@@ -2,11 +2,11 @@ import { Hono } from "hono";
 
 import { countUserInsights, countUserNodes, getDb } from "./db";
 import { getPlanLimits, syncUsagePeriod } from "./limits";
-import type { AppEnv } from "./middleware";
-import { authMiddleware } from "./middleware";
+import { authMiddleware, rateLimitMiddleware, requireUserAuth } from "./middleware";
+import type { AppEnv } from "./types";
 
 export const statsRoutes = new Hono<AppEnv>();
-statsRoutes.use("*", authMiddleware);
+statsRoutes.use("*", authMiddleware, rateLimitMiddleware, requireUserAuth);
 
 statsRoutes.get("/", async (c) => {
   const db = await getDb(c.env);
@@ -18,6 +18,7 @@ statsRoutes.get("/", async (c) => {
 
   return c.json({
     nodes,
+    edges: 0,
     insights,
     plan: user.plan,
     usage: {

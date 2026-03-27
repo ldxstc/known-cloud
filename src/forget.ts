@@ -1,15 +1,15 @@
 import { Hono } from "hono";
 
 import { deleteNodesMatching, getDb } from "./db";
-import type { AppEnv } from "./middleware";
-import { authMiddleware } from "./middleware";
+import { authMiddleware, rateLimitMiddleware, requireUserAuth } from "./middleware";
+import type { AppEnv } from "./types";
 
 type ForgetBody = {
   what?: string;
 };
 
 export const forgetRoutes = new Hono<AppEnv>();
-forgetRoutes.use("*", authMiddleware);
+forgetRoutes.use("*", authMiddleware, rateLimitMiddleware, requireUserAuth);
 
 forgetRoutes.delete("/", async (c) => {
   const body = (await c.req.json().catch(() => null)) as ForgetBody | null;

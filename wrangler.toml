@@ -4,9 +4,12 @@ compatibility_date = "2025-03-01"
 
 [vars]
 ENVIRONMENT = "production"
+APP_BASE_URL = "http://localhost:8787"
 TURSO_URL = ""
 TURSO_AUTH_TOKEN = ""
 OPENAI_API_KEY = ""
+STRIPE_SECRET_KEY = ""
+STRIPE_WEBHOOK_SECRET = ""
 
 # Secrets (set via wrangler secret put):
 # TURSO_URL

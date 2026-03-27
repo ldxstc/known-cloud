@@ -3,11 +3,11 @@ import { Hono } from "hono";
 import { getDb, getUserNodes } from "./db";
 import { generateEmbeddingVector, semanticSearch } from "./embeddings";
 import { ensureWithinLimit, recordUsage } from "./limits";
-import type { AppEnv } from "./middleware";
-import { authMiddleware } from "./middleware";
+import { authMiddleware, rateLimitMiddleware, requireScopes } from "./middleware";
+import type { AppEnv } from "./types";
 
 export const searchRoutes = new Hono<AppEnv>();
-searchRoutes.use("*", authMiddleware);
+searchRoutes.use("*", authMiddleware, rateLimitMiddleware, requireScopes("search"));
 
 searchRoutes.get("/", async (c) => {
   const query = c.req.query("q")?.trim();

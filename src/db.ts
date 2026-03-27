@@ -1,10 +1,25 @@
 import { createClient, type Client, type Row } from "@libsql/client/web";
 
-import { createInsightId, createNodeId, createUserId } from "./ids";
+import {
+  createAccessGrantId,
+  createAccessToken,
+  createApiKeyId,
+  createDeveloperClientId,
+  createDeveloperClientSecret,
+  createDeveloperId,
+  createInsightId,
+  createNodeId,
+  createUserId,
+} from "./ids";
+import { runMigrations } from "./migrations";
+import { nowIso, parseJsonArray, sanitizeNullableString, stringifyJsonArray } from "./utils";
 
 export interface EnvBindings {
+  APP_BASE_URL?: string;
   ENVIRONMENT?: string;
   OPENAI_API_KEY?: string;
+  STRIPE_SECRET_KEY?: string;
+  STRIPE_WEBHOOK_SECRET?: string;
   TURSO_AUTH_TOKEN?: string;
   TURSO_URL?: string;
 }
@@ -18,9 +33,53 @@ export interface UserRow {
   plan: string;
   created_at: string;
   stripe_customer_id: string | null;
+  stripe_subscription_id: string | null;
+  plan_period_end: string | null;
+  cancel_at_period_end: boolean;
   usage_queries: number;
   usage_ingestions: number;
   usage_period: string | null;
+}
+
+export interface ApiKeyRow {
+  id: string;
+  user_id: string;
+  key_value: string;
+  device_id: string | null;
+  device_name: string | null;
+  agent_platform: string | null;
+  created_at: string;
+  revoked_at: string | null;
+  last_used_at: string | null;
+}
+
+export interface AccessGrantRow {
+  id: string;
+  user_id: string;
+  developer_id: string;
+  scopes: string;
+  access_token: string;
+  created_at: string;
+  revoked_at: string | null;
+  last_used_at: string | null;
+}
+
+export interface DeveloperRow {
+  id: string;
+  name: string;
+  website: string;
+  redirect_uri: string;
+  client_id: string;
+  client_secret: string;
+  created_at: string;
+}
+
+export interface DeviceLinkCodeRow {
+  code: string;
+  user_id: string;
+  created_at: string;
+  expires_at: string;
+  consumed_at: string | null;
 }
 
 export interface NodeRow {
@@ -53,59 +112,7 @@ export interface InsightRow {
   embedding: ArrayBuffer | null;
 }
 
-const SCHEMA_SQL = `
-CREATE TABLE IF NOT EXISTS users (
-  id TEXT PRIMARY KEY,
-  device_id TEXT UNIQUE NOT NULL,
-  api_key TEXT UNIQUE NOT NULL,
-  agent_platform TEXT,
-  device_name TEXT,
-  plan TEXT DEFAULT 'free',
-  created_at TEXT NOT NULL,
-  stripe_customer_id TEXT,
-  usage_queries INTEGER DEFAULT 0,
-  usage_ingestions INTEGER DEFAULT 0,
-  usage_period TEXT
-);
-
-CREATE TABLE IF NOT EXISTS nodes (
-  id TEXT PRIMARY KEY,
-  user_id TEXT NOT NULL,
-  type TEXT NOT NULL,
-  text TEXT NOT NULL,
-  specific_context TEXT,
-  files_touched TEXT,
-  confidence REAL DEFAULT 1.0,
-  source TEXT,
-  created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL,
-  decay_rate REAL DEFAULT 0.01,
-  times_observed INTEGER DEFAULT 1,
-  embedding BLOB,
-  FOREIGN KEY (user_id) REFERENCES users(id)
-);
-
-CREATE TABLE IF NOT EXISTS insights (
-  id TEXT PRIMARY KEY,
-  user_id TEXT NOT NULL,
-  text TEXT NOT NULL,
-  supporting_nodes TEXT,
-  confidence REAL DEFAULT 0.4,
-  discovered_at TEXT NOT NULL,
-  times_rediscovered INTEGER DEFAULT 0,
-  times_used INTEGER DEFAULT 0,
-  last_used TEXT,
-  initiated_at TEXT,
-  embedding BLOB,
-  FOREIGN KEY (user_id) REFERENCES users(id)
-);
-
-CREATE INDEX IF NOT EXISTS idx_nodes_user ON nodes(user_id);
-CREATE INDEX IF NOT EXISTS idx_insights_user ON insights(user_id);
-CREATE INDEX IF NOT EXISTS idx_users_api_key ON users(api_key);
-`;
-
-const schemaInit = new Map<string, Promise<void>>();
+const initialized = new Map<string, Promise<void>>();
 
 function requireEnv(name: keyof EnvBindings, value?: string) {
   if (!value) {
@@ -116,7 +123,7 @@ function requireEnv(name: keyof EnvBindings, value?: string) {
 }
 
 function asString(value: Row[string] | undefined) {
-  if (value === null || value === undefined) {
+  if (value === undefined || value === null) {
     return null;
   }
 
@@ -148,6 +155,10 @@ function asNumber(value: Row[string] | undefined) {
   return 0;
 }
 
+function asBoolean(value: Row[string] | undefined) {
+  return asNumber(value) !== 0;
+}
+
 function asBlob(value: Row[string] | undefined) {
   return value instanceof ArrayBuffer ? value : null;
 }
@@ -162,9 +173,61 @@ function mapUser(row: Row): UserRow {
     plan: asRequiredString(row.plan, "plan"),
     created_at: asRequiredString(row.created_at, "created_at"),
     stripe_customer_id: asString(row.stripe_customer_id),
+    stripe_subscription_id: asString(row.stripe_subscription_id),
+    plan_period_end: asString(row.plan_period_end),
+    cancel_at_period_end: asBoolean(row.cancel_at_period_end),
     usage_queries: asNumber(row.usage_queries),
     usage_ingestions: asNumber(row.usage_ingestions),
     usage_period: asString(row.usage_period),
+  };
+}
+
+function mapApiKey(row: Row): ApiKeyRow {
+  return {
+    id: asRequiredString(row.id, "id"),
+    user_id: asRequiredString(row.user_id, "user_id"),
+    key_value: asRequiredString(row.key_value, "key_value"),
+    device_id: asString(row.device_id),
+    device_name: asString(row.device_name),
+    agent_platform: asString(row.agent_platform),
+    created_at: asRequiredString(row.created_at, "created_at"),
+    revoked_at: asString(row.revoked_at),
+    last_used_at: asString(row.last_used_at),
+  };
+}
+
+function mapAccessGrant(row: Row): AccessGrantRow {
+  return {
+    id: asRequiredString(row.id, "id"),
+    user_id: asRequiredString(row.user_id, "user_id"),
+    developer_id: asRequiredString(row.developer_id, "developer_id"),
+    scopes: asRequiredString(row.scopes, "scopes"),
+    access_token: asRequiredString(row.access_token, "access_token"),
+    created_at: asRequiredString(row.created_at, "created_at"),
+    revoked_at: asString(row.revoked_at),
+    last_used_at: asString(row.last_used_at),
+  };
+}
+
+function mapDeveloper(row: Row): DeveloperRow {
+  return {
+    id: asRequiredString(row.id, "id"),
+    name: asRequiredString(row.name, "name"),
+    website: asRequiredString(row.website, "website"),
+    redirect_uri: asRequiredString(row.redirect_uri, "redirect_uri"),
+    client_id: asRequiredString(row.client_id, "client_id"),
+    client_secret: asRequiredString(row.client_secret, "client_secret"),
+    created_at: asRequiredString(row.created_at, "created_at"),
+  };
+}
+
+function mapDeviceLinkCode(row: Row): DeviceLinkCodeRow {
+  return {
+    code: asRequiredString(row.code, "code"),
+    user_id: asRequiredString(row.user_id, "user_id"),
+    created_at: asRequiredString(row.created_at, "created_at"),
+    expires_at: asRequiredString(row.expires_at, "expires_at"),
+    consumed_at: asString(row.consumed_at),
   };
 }
 
@@ -202,36 +265,18 @@ function mapInsight(row: Row): InsightRow {
   };
 }
 
-async function ensureUsageColumns(db: Client) {
-  const result = await db.execute("PRAGMA table_info(users)");
-  const columns = new Set(result.rows.map((row) => String(row.name)));
-
-  if (!columns.has("usage_queries")) {
-    await db.execute("ALTER TABLE users ADD COLUMN usage_queries INTEGER DEFAULT 0");
-  }
-
-  if (!columns.has("usage_ingestions")) {
-    await db.execute("ALTER TABLE users ADD COLUMN usage_ingestions INTEGER DEFAULT 0");
-  }
-
-  if (!columns.has("usage_period")) {
-    await db.execute("ALTER TABLE users ADD COLUMN usage_period TEXT");
-  }
-}
-
-async function initializeSchema(db: Client, key: string) {
-  let promise = schemaInit.get(key);
+async function initializeDb(db: Client, key: string) {
+  let promise = initialized.get(key);
 
   if (!promise) {
     promise = (async () => {
-      await db.executeMultiple(SCHEMA_SQL);
-      await ensureUsageColumns(db);
+      await runMigrations(db);
     })().catch((error) => {
-      schemaInit.delete(key);
+      initialized.delete(key);
       throw error;
     });
 
-    schemaInit.set(key, promise);
+    initialized.set(key, promise);
   }
 
   await promise;
@@ -244,20 +289,255 @@ export async function getDb(env: EnvBindings) {
     authToken: env.TURSO_AUTH_TOKEN,
   });
 
-  await initializeSchema(db, url);
+  await initializeDb(db, url);
   return db;
 }
 
-export async function getUserByDeviceId(db: Client, deviceId: string) {
-  const result = await db.execute("SELECT * FROM users WHERE device_id = ? LIMIT 1", [deviceId]);
-  const row = result.rows[0];
-  return row ? mapUser(row) : null;
+export async function getUserById(db: Client, userId: string) {
+  const result = await db.execute("SELECT * FROM users WHERE id = ? LIMIT 1", [userId]);
+  return result.rows[0] ? mapUser(result.rows[0]) : null;
 }
 
-export async function getUserByApiKey(db: Client, apiKey: string) {
-  const result = await db.execute("SELECT * FROM users WHERE api_key = ? LIMIT 1", [apiKey]);
-  const row = result.rows[0];
-  return row ? mapUser(row) : null;
+export async function getUserByStripeCustomerId(db: Client, customerId: string) {
+  const result = await db.execute("SELECT * FROM users WHERE stripe_customer_id = ? LIMIT 1", [customerId]);
+  return result.rows[0] ? mapUser(result.rows[0]) : null;
+}
+
+export async function getUserByStripeSubscriptionId(db: Client, subscriptionId: string) {
+  const result = await db.execute("SELECT * FROM users WHERE stripe_subscription_id = ? LIMIT 1", [subscriptionId]);
+  return result.rows[0] ? mapUser(result.rows[0]) : null;
+}
+
+export async function getActiveApiKeyByValue(db: Client, keyValue: string) {
+  const result = await db.execute(
+    "SELECT * FROM api_keys WHERE key_value = ? AND revoked_at IS NULL LIMIT 1",
+    [keyValue],
+  );
+
+  return result.rows[0] ? mapApiKey(result.rows[0]) : null;
+}
+
+export async function getActiveApiKeyById(db: Client, keyId: string) {
+  const result = await db.execute("SELECT * FROM api_keys WHERE id = ? AND revoked_at IS NULL LIMIT 1", [keyId]);
+  return result.rows[0] ? mapApiKey(result.rows[0]) : null;
+}
+
+export async function getActiveApiKeyByDeviceId(db: Client, deviceId: string) {
+  const result = await db.execute(
+    "SELECT * FROM api_keys WHERE device_id = ? AND revoked_at IS NULL LIMIT 1",
+    [deviceId],
+  );
+
+  return result.rows[0] ? mapApiKey(result.rows[0]) : null;
+}
+
+export async function listActiveApiKeys(db: Client, userId: string) {
+  const result = await db.execute(
+    "SELECT * FROM api_keys WHERE user_id = ? AND revoked_at IS NULL ORDER BY created_at DESC",
+    [userId],
+  );
+
+  return result.rows.map(mapApiKey);
+}
+
+export async function countActiveApiKeys(db: Client, userId: string) {
+  const result = await db.execute(
+    "SELECT COUNT(*) AS count FROM api_keys WHERE user_id = ? AND revoked_at IS NULL",
+    [userId],
+  );
+
+  return asNumber(result.rows[0]?.count);
+}
+
+export async function createApiKeyRecord(
+  db: Client,
+  input: {
+    userId: string;
+    keyValue: string;
+    deviceId?: string | null;
+    deviceName?: string | null;
+    agentPlatform?: string | null;
+    createdAt?: string;
+  },
+) {
+  const createdAt = input.createdAt ?? nowIso();
+  const id = createApiKeyId();
+  await db.execute(
+    `INSERT INTO api_keys (
+      id, user_id, key_value, device_id, device_name, agent_platform, created_at, revoked_at, last_used_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL)`,
+    [
+      id,
+      input.userId,
+      input.keyValue,
+      sanitizeNullableString(input.deviceId),
+      sanitizeNullableString(input.deviceName),
+      sanitizeNullableString(input.agentPlatform),
+      createdAt,
+    ],
+  );
+
+  const created = await getActiveApiKeyById(db, id);
+  if (!created) {
+    throw new Error("API key creation failed.");
+  }
+
+  return created;
+}
+
+export async function revokeApiKey(db: Client, userId: string, keyId: string) {
+  await db.execute(
+    "UPDATE api_keys SET revoked_at = ? WHERE id = ? AND user_id = ? AND revoked_at IS NULL",
+    [nowIso(), keyId, userId],
+  );
+
+  return asNumber((await db.execute("SELECT changes() AS count")).rows[0]?.count);
+}
+
+export async function touchApiKey(db: Client, keyId: string) {
+  await db.execute("UPDATE api_keys SET last_used_at = ? WHERE id = ?", [nowIso(), keyId]);
+}
+
+export async function getUserByDeviceId(db: Client, deviceId: string) {
+  const apiKey = await getActiveApiKeyByDeviceId(db, deviceId);
+  if (!apiKey) {
+    return null;
+  }
+
+  return getUserById(db, apiKey.user_id);
+}
+
+export async function getActiveAccessGrantByToken(db: Client, token: string) {
+  const result = await db.execute(
+    "SELECT * FROM access_grants WHERE access_token = ? AND revoked_at IS NULL LIMIT 1",
+    [token],
+  );
+
+  return result.rows[0] ? mapAccessGrant(result.rows[0]) : null;
+}
+
+export async function getActiveAccessGrantByUserAndDeveloper(db: Client, userId: string, developerId: string) {
+  const result = await db.execute(
+    `SELECT * FROM access_grants
+     WHERE user_id = ? AND developer_id = ? AND revoked_at IS NULL
+     ORDER BY created_at DESC LIMIT 1`,
+    [userId, developerId],
+  );
+
+  return result.rows[0] ? mapAccessGrant(result.rows[0]) : null;
+}
+
+export async function createOrUpdateAccessGrant(
+  db: Client,
+  input: {
+    userId: string;
+    developerId: string;
+    scopes: string[];
+  },
+) {
+  const existing = await getActiveAccessGrantByUserAndDeveloper(db, input.userId, input.developerId);
+  const scopes = stringifyJsonArray(input.scopes);
+
+  if (existing) {
+    await db.execute(
+      "UPDATE access_grants SET scopes = ?, last_used_at = NULL WHERE id = ?",
+      [scopes, existing.id],
+    );
+
+    const refreshed = await getActiveAccessGrantByUserAndDeveloper(db, input.userId, input.developerId);
+    if (!refreshed) {
+      throw new Error("Access grant refresh failed.");
+    }
+
+    return refreshed;
+  }
+
+  const id = createAccessGrantId();
+  const createdAt = nowIso();
+  await db.execute(
+    `INSERT INTO access_grants (
+      id, user_id, developer_id, scopes, access_token, created_at, revoked_at, last_used_at
+    ) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL)`,
+    [
+      id,
+      input.userId,
+      input.developerId,
+      scopes,
+      createAccessToken(),
+      createdAt,
+    ],
+  );
+
+  const created = await db.execute("SELECT * FROM access_grants WHERE id = ? LIMIT 1", [id]);
+  if (!created.rows[0]) {
+    throw new Error("Access grant creation failed.");
+  }
+
+  return mapAccessGrant(created.rows[0]);
+}
+
+export async function listActiveAccessGrants(db: Client, userId: string) {
+  const result = await db.execute(
+    "SELECT * FROM access_grants WHERE user_id = ? AND revoked_at IS NULL ORDER BY created_at DESC",
+    [userId],
+  );
+
+  return result.rows.map(mapAccessGrant);
+}
+
+export async function revokeAccessGrant(db: Client, userId: string, developerId: string) {
+  await db.execute(
+    `UPDATE access_grants
+     SET revoked_at = ?
+     WHERE user_id = ? AND developer_id = ? AND revoked_at IS NULL`,
+    [nowIso(), userId, developerId],
+  );
+
+  return asNumber((await db.execute("SELECT changes() AS count")).rows[0]?.count);
+}
+
+export async function touchAccessGrant(db: Client, grantId: string) {
+  await db.execute("UPDATE access_grants SET last_used_at = ? WHERE id = ?", [nowIso(), grantId]);
+}
+
+export async function createDeviceLinkCode(
+  db: Client,
+  input: {
+    code: string;
+    userId: string;
+    createdAt?: string;
+    expiresAt: string;
+  },
+) {
+  const createdAt = input.createdAt ?? nowIso();
+  await db.execute("DELETE FROM device_link_codes WHERE user_id = ? AND consumed_at IS NULL", [input.userId]);
+  await db.execute(
+    `INSERT INTO device_link_codes (code, user_id, created_at, expires_at, consumed_at)
+     VALUES (?, ?, ?, ?, NULL)`,
+    [input.code, input.userId, createdAt, input.expiresAt],
+  );
+
+  const result = await db.execute("SELECT * FROM device_link_codes WHERE code = ? LIMIT 1", [input.code]);
+  if (!result.rows[0]) {
+    throw new Error("Device link code creation failed.");
+  }
+
+  return mapDeviceLinkCode(result.rows[0]);
+}
+
+export async function getActiveDeviceLinkCode(db: Client, code: string) {
+  const result = await db.execute(
+    `SELECT * FROM device_link_codes
+     WHERE code = ? AND consumed_at IS NULL
+     ORDER BY created_at DESC LIMIT 1`,
+    [code],
+  );
+
+  return result.rows[0] ? mapDeviceLinkCode(result.rows[0]) : null;
+}
+
+export async function consumeDeviceLinkCode(db: Client, code: string) {
+  await db.execute("UPDATE device_link_codes SET consumed_at = ? WHERE code = ? AND consumed_at IS NULL", [nowIso(), code]);
 }
 
 export async function createUser(
@@ -282,10 +562,14 @@ export async function createUser(
       device_name,
       plan,
       created_at,
+      stripe_customer_id,
+      stripe_subscription_id,
+      plan_period_end,
+      cancel_at_period_end,
       usage_queries,
       usage_ingestions,
       usage_period
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, ?)`,
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, 0, 0, 0, ?)`,
     [
       userId,
       input.deviceId,
@@ -298,7 +582,16 @@ export async function createUser(
     ],
   );
 
-  const created = await getUserByDeviceId(db, input.deviceId);
+  await createApiKeyRecord(db, {
+    userId,
+    keyValue: input.apiKey,
+    deviceId: input.deviceId,
+    deviceName: input.deviceName,
+    agentPlatform: input.agentPlatform,
+    createdAt: input.createdAt,
+  });
+
+  const created = await getUserById(db, userId);
   if (!created) {
     throw new Error("User creation failed.");
   }
@@ -318,6 +611,41 @@ export async function incrementUserUsage(db: Client, userId: string, field: "que
   await db.execute(`UPDATE users SET ${column} = ${column} + 1 WHERE id = ?`, [userId]);
 }
 
+export async function updateUserPlan(
+  db: Client,
+  input: {
+    userId: string;
+    plan: string;
+    stripeCustomerId?: string | null;
+    stripeSubscriptionId?: string | null;
+    planPeriodEnd?: string | null;
+    cancelAtPeriodEnd?: boolean;
+  },
+) {
+  const existing = await getUserById(db, input.userId);
+  if (!existing) {
+    throw new Error("User not found.");
+  }
+
+  await db.execute(
+    `UPDATE users
+     SET plan = ?,
+         stripe_customer_id = ?,
+         stripe_subscription_id = ?,
+         plan_period_end = ?,
+         cancel_at_period_end = ?
+     WHERE id = ?`,
+    [
+      input.plan,
+      input.stripeCustomerId === undefined ? existing.stripe_customer_id : (input.stripeCustomerId ?? null),
+      input.stripeSubscriptionId === undefined ? existing.stripe_subscription_id : (input.stripeSubscriptionId ?? null),
+      input.planPeriodEnd === undefined ? existing.plan_period_end : (input.planPeriodEnd ?? null),
+      input.cancelAtPeriodEnd === undefined ? (existing.cancel_at_period_end ? 1 : 0) : (input.cancelAtPeriodEnd ? 1 : 0),
+      input.userId,
+    ],
+  );
+}
+
 export async function countUserNodes(db: Client, userId: string) {
   const result = await db.execute("SELECT COUNT(*) AS count FROM nodes WHERE user_id = ?", [userId]);
   return asNumber(result.rows[0]?.count);
@@ -329,13 +657,38 @@ export async function countUserInsights(db: Client, userId: string) {
 }
 
 export async function getUserNodes(db: Client, userId: string) {
-  const result = await db.execute("SELECT * FROM nodes WHERE user_id = ? ORDER BY updated_at DESC", [userId]);
+  const result = await db.execute(
+    "SELECT * FROM nodes WHERE user_id = ? ORDER BY confidence DESC, updated_at DESC",
+    [userId],
+  );
+
   return result.rows.map(mapNode);
 }
 
 export async function getUserInsights(db: Client, userId: string) {
-  const result = await db.execute("SELECT * FROM insights WHERE user_id = ? ORDER BY confidence DESC, discovered_at DESC", [userId]);
+  const result = await db.execute(
+    "SELECT * FROM insights WHERE user_id = ? ORDER BY confidence DESC, times_rediscovered DESC, discovered_at DESC",
+    [userId],
+  );
+
   return result.rows.map(mapInsight);
+}
+
+export async function getDistinctUserNodeTypes(db: Client, userId: string) {
+  const result = await db.execute("SELECT DISTINCT type FROM nodes WHERE user_id = ? ORDER BY type ASC", [userId]);
+  return result.rows.map((row) => asRequiredString(row.type, "type"));
+}
+
+export async function getUserNodesByType(db: Client, userId: string, type: string, limit: number = 5) {
+  const result = await db.execute(
+    `SELECT * FROM nodes
+     WHERE user_id = ? AND type = ?
+     ORDER BY confidence DESC, times_observed DESC, updated_at DESC
+     LIMIT ?`,
+    [userId, type, limit],
+  );
+
+  return result.rows.map(mapNode);
 }
 
 export async function findUserNodeByTypeAndText(db: Client, userId: string, type: string, text: string) {
@@ -344,18 +697,7 @@ export async function findUserNodeByTypeAndText(db: Client, userId: string, type
     [userId, type, text],
   );
 
-  const row = result.rows[0];
-  return row ? mapNode(row) : null;
-}
-
-export async function findInsightByText(db: Client, userId: string, text: string) {
-  const result = await db.execute(
-    "SELECT * FROM insights WHERE user_id = ? AND LOWER(text) = LOWER(?) LIMIT 1",
-    [userId, text],
-  );
-
-  const row = result.rows[0];
-  return row ? mapInsight(row) : null;
+  return result.rows[0] ? mapNode(result.rows[0]) : null;
 }
 
 export async function insertNode(
@@ -366,6 +708,7 @@ export async function insertNode(
     decayRate?: number;
     embedding: ArrayBuffer | null;
     filesTouched?: string | null;
+    id?: string;
     source?: string | null;
     specificContext?: string | null;
     text: string;
@@ -375,22 +718,11 @@ export async function insertNode(
     userId: string;
   },
 ) {
-  const id = createNodeId();
+  const id = input.id ?? createNodeId();
   await db.execute(
     `INSERT INTO nodes (
-      id,
-      user_id,
-      type,
-      text,
-      specific_context,
-      files_touched,
-      confidence,
-      source,
-      created_at,
-      updated_at,
-      decay_rate,
-      times_observed,
-      embedding
+      id, user_id, type, text, specific_context, files_touched, confidence, source,
+      created_at, updated_at, decay_rate, times_observed, embedding
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       id,
@@ -409,13 +741,12 @@ export async function insertNode(
     ],
   );
 
-  const inserted = await db.execute("SELECT * FROM nodes WHERE id = ? LIMIT 1", [id]);
-  const row = inserted.rows[0];
-  if (!row) {
+  const result = await db.execute("SELECT * FROM nodes WHERE id = ? LIMIT 1", [id]);
+  if (!result.rows[0]) {
     throw new Error("Node insertion failed.");
   }
 
-  return mapNode(row);
+  return mapNode(result.rows[0]);
 }
 
 export async function updateNodeObservation(
@@ -455,12 +786,11 @@ export async function updateNodeObservation(
   );
 
   const result = await db.execute("SELECT * FROM nodes WHERE id = ? LIMIT 1", [nodeId]);
-  const row = result.rows[0];
-  if (!row) {
+  if (!result.rows[0]) {
     throw new Error("Node update failed.");
   }
 
-  return mapNode(row);
+  return mapNode(result.rows[0]);
 }
 
 export async function penalizeNodeConfidence(db: Client, nodeId: string, factor: number) {
@@ -482,85 +812,209 @@ export async function deleteNodesMatching(db: Client, userId: string, needle: st
   return typeof result.rowsAffected === "bigint" ? Number(result.rowsAffected) : (result.rowsAffected ?? 0);
 }
 
-export async function upsertInsight(
+export async function findInsightByText(db: Client, userId: string, text: string) {
+  const result = await db.execute(
+    "SELECT * FROM insights WHERE user_id = ? AND LOWER(text) = LOWER(?) LIMIT 1",
+    [userId, text],
+  );
+
+  return result.rows[0] ? mapInsight(result.rows[0]) : null;
+}
+
+export async function insertInsight(
   db: Client,
   input: {
-    confidence: number;
-    discoveredAt: string;
-    embedding: ArrayBuffer | null;
-    initiatedAt?: string | null;
-    supportingNodes?: string[] | null;
-    text: string;
+    id?: string;
     userId: string;
+    text: string;
+    supportingNodes?: string[] | null;
+    confidence?: number;
+    discoveredAt?: string;
+    embedding?: ArrayBuffer | null;
+    initiatedAt?: string | null;
   },
 ) {
-  const existing = await findInsightByText(db, input.userId, input.text);
-  if (existing) {
-    await db.execute(
-      `UPDATE insights
-       SET confidence = MAX(confidence, ?),
-           times_rediscovered = times_rediscovered + 1,
-           supporting_nodes = COALESCE(?, supporting_nodes),
-           embedding = COALESCE(?, embedding)
-       WHERE id = ?`,
-      [
-        input.confidence,
-        input.supportingNodes ? JSON.stringify(input.supportingNodes) : null,
-        input.embedding,
-        existing.id,
-      ],
-    );
-
-    const refreshed = await db.execute("SELECT * FROM insights WHERE id = ? LIMIT 1", [existing.id]);
-    const row = refreshed.rows[0];
-    if (!row) {
-      throw new Error("Insight refresh failed.");
-    }
-
-    return { created: false, row: mapInsight(row) };
-  }
-
-  const id = createInsightId();
+  const id = input.id ?? createInsightId();
+  const discoveredAt = input.discoveredAt ?? nowIso();
   await db.execute(
     `INSERT INTO insights (
-      id,
-      user_id,
-      text,
-      supporting_nodes,
-      confidence,
-      discovered_at,
-      times_rediscovered,
-      times_used,
-      last_used,
-      initiated_at,
-      embedding
+      id, user_id, text, supporting_nodes, confidence, discovered_at,
+      times_rediscovered, times_used, last_used, initiated_at, embedding
     ) VALUES (?, ?, ?, ?, ?, ?, 0, 0, NULL, ?, ?)`,
     [
       id,
       input.userId,
       input.text,
-      input.supportingNodes ? JSON.stringify(input.supportingNodes) : null,
-      input.confidence,
-      input.discoveredAt,
+      input.supportingNodes ? stringifyJsonArray(input.supportingNodes) : null,
+      input.confidence ?? 0.4,
+      discoveredAt,
       input.initiatedAt ?? null,
-      input.embedding,
+      input.embedding ?? null,
     ],
   );
 
-  const inserted = await db.execute("SELECT * FROM insights WHERE id = ? LIMIT 1", [id]);
-  const row = inserted.rows[0];
-  if (!row) {
+  const result = await db.execute("SELECT * FROM insights WHERE id = ? LIMIT 1", [id]);
+  if (!result.rows[0]) {
     throw new Error("Insight insertion failed.");
   }
 
-  return { created: true, row: mapInsight(row) };
+  return mapInsight(result.rows[0]);
+}
+
+export async function strengthenInsight(
+  db: Client,
+  insightId: string,
+  updates?: {
+    text?: string;
+    embedding?: ArrayBuffer | null;
+  },
+) {
+  await db.execute(
+    `UPDATE insights
+     SET times_rediscovered = times_rediscovered + 1,
+         confidence = MIN(1.0, confidence + 0.1),
+         text = COALESCE(?, text),
+         embedding = COALESCE(?, embedding)
+     WHERE id = ?`,
+    [
+      updates?.text ?? null,
+      updates?.embedding ?? null,
+      insightId,
+    ],
+  );
+
+  const result = await db.execute("SELECT * FROM insights WHERE id = ? LIMIT 1", [insightId]);
+  if (!result.rows[0]) {
+    throw new Error("Insight strengthen failed.");
+  }
+
+  return mapInsight(result.rows[0]);
+}
+
+export async function updateInsightSupportingNodes(db: Client, insightId: string, nodeIds: string[]) {
+  const unique = [...new Set(nodeIds)];
+  await db.execute("UPDATE insights SET supporting_nodes = ? WHERE id = ?", [stringifyJsonArray(unique), insightId]);
+}
+
+export async function addInsightSupport(db: Client, insightId: string, nodeIds: string[]) {
+  const result = await db.execute("SELECT * FROM insights WHERE id = ? LIMIT 1", [insightId]);
+  if (!result.rows[0]) {
+    return;
+  }
+
+  const current = mapInsight(result.rows[0]);
+  const merged = [...new Set([...parseJsonArray(current.supporting_nodes), ...nodeIds])];
+  await updateInsightSupportingNodes(db, insightId, merged);
+}
+
+export async function upsertInsight(
+  db: Client,
+  input: {
+    userId: string;
+    text: string;
+    supportingNodes?: string[] | null;
+    confidence: number;
+    discoveredAt: string;
+    embedding: ArrayBuffer | null;
+  },
+) {
+  const existing = await findInsightByText(db, input.userId, input.text);
+  if (existing) {
+    const row = await strengthenInsight(db, existing.id, {
+      text: input.text.length > existing.text.length ? input.text : undefined,
+      embedding: input.embedding ?? undefined,
+    });
+    await addInsightSupport(db, row.id, input.supportingNodes ?? []);
+    return { created: false, row };
+  }
+
+  const row = await insertInsight(db, {
+    userId: input.userId,
+    text: input.text,
+    supportingNodes: input.supportingNodes ?? undefined,
+    confidence: input.confidence,
+    discoveredAt: input.discoveredAt,
+    embedding: input.embedding,
+  });
+
+  return { created: true, row };
 }
 
 export async function markInsightsUsed(db: Client, insightIds: string[], timestamp: string) {
   for (const insightId of insightIds) {
     await db.execute(
-      "UPDATE insights SET times_used = times_used + 1, last_used = ? WHERE id = ?",
+      `UPDATE insights
+       SET times_used = times_used + 1,
+           last_used = ?,
+           confidence = MIN(1.0, confidence + 0.05)
+       WHERE id = ?`,
       [timestamp, insightId],
     );
   }
+}
+
+export async function markInsightInitiated(db: Client, insightId: string, timestamp: string = nowIso()) {
+  await db.execute("UPDATE insights SET initiated_at = COALESCE(initiated_at, ?) WHERE id = ?", [timestamp, insightId]);
+}
+
+export async function createDeveloper(
+  db: Client,
+  input: {
+    name: string;
+    website: string;
+    redirectUri: string;
+  },
+) {
+  const id = createDeveloperId();
+  await db.execute(
+    `INSERT INTO developers (id, name, website, redirect_uri, client_id, client_secret, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    [
+      id,
+      input.name,
+      input.website,
+      input.redirectUri,
+      createDeveloperClientId(),
+      createDeveloperClientSecret(),
+      nowIso(),
+    ],
+  );
+
+  const result = await db.execute("SELECT * FROM developers WHERE id = ? LIMIT 1", [id]);
+  if (!result.rows[0]) {
+    throw new Error("Developer creation failed.");
+  }
+
+  return mapDeveloper(result.rows[0]);
+}
+
+export async function getDeveloperById(db: Client, developerId: string) {
+  const result = await db.execute("SELECT * FROM developers WHERE id = ? LIMIT 1", [developerId]);
+  return result.rows[0] ? mapDeveloper(result.rows[0]) : null;
+}
+
+export async function listDevelopers(db: Client) {
+  const result = await db.execute("SELECT * FROM developers ORDER BY created_at DESC");
+  return result.rows.map(mapDeveloper);
+}
+
+export async function incrementRateLimitWindow(db: Client, subjectId: string, windowKey: string) {
+  await db.execute(
+    `INSERT INTO request_rate_limits (subject_id, window_key, count, updated_at)
+     VALUES (?, ?, 1, ?)
+     ON CONFLICT(subject_id, window_key)
+     DO UPDATE SET count = count + 1, updated_at = excluded.updated_at`,
+    [subjectId, windowKey, nowIso()],
+  );
+
+  const result = await db.execute(
+    "SELECT count FROM request_rate_limits WHERE subject_id = ? AND window_key = ? LIMIT 1",
+    [subjectId, windowKey],
+  );
+
+  return asNumber(result.rows[0]?.count);
+}
+
+export async function cleanupOldRateLimitWindows(db: Client, cutoffIso: string) {
+  await db.execute("DELETE FROM request_rate_limits WHERE updated_at < ?", [cutoffIso]);
 }

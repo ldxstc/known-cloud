@@ -3,8 +3,8 @@ import { Hono } from "hono";
 import { findUserNodeByTypeAndText, getDb, insertNode, updateNodeObservation } from "./db";
 import { generateEmbeddingBlob } from "./embeddings";
 import { ensureWithinLimit, recordUsage } from "./limits";
-import type { AppEnv } from "./middleware";
-import { authMiddleware } from "./middleware";
+import { authMiddleware, rateLimitMiddleware, requireUserAuth } from "./middleware";
+import type { AppEnv } from "./types";
 
 type RememberBody = {
   what?: string;
@@ -12,7 +12,7 @@ type RememberBody = {
 };
 
 export const rememberRoutes = new Hono<AppEnv>();
-rememberRoutes.use("*", authMiddleware);
+rememberRoutes.use("*", authMiddleware, rateLimitMiddleware, requireUserAuth);
 
 rememberRoutes.post("/", async (c) => {
   const body = (await c.req.json().catch(() => null)) as RememberBody | null;
@@ -42,6 +42,7 @@ rememberRoutes.post("/", async (c) => {
         updatedAt: new Date().toISOString(),
       })
     : await insertNode(db, {
+        userId: c.get("user").id,
         confidence: 1,
         createdAt: new Date().toISOString(),
         embedding,
@@ -49,7 +50,6 @@ rememberRoutes.post("/", async (c) => {
         specificContext,
         text: what,
         type,
-        userId: c.get("user").id,
       });
 
   await recordUsage(c, db, "ingestions");

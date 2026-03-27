@@ -1,18 +1,13 @@
 import { Hono } from "hono";
 
-import {
-  getDb,
-  getUserInsights,
-  getUserNodes,
-  markInsightsUsed,
-  upsertInsight,
-} from "./db";
-import { generateEmbeddingBlob, generateEmbeddingVector, semanticSearch } from "./embeddings";
+import { getDb, getUserInsights, getUserNodes, markInsightsUsed } from "./db";
+import { generateEmbeddingVector, semanticSearch } from "./embeddings";
 import { ensureWithinLimit, recordUsage } from "./limits";
-import type { AppEnv } from "./middleware";
-import { authMiddleware } from "./middleware";
+import { authMiddleware, rateLimitMiddleware, requireScopes } from "./middleware";
 import { createJsonCompletion, SYNTHESIS_MODEL } from "./openai";
 import { THINK_SYSTEM, THINK_USER } from "./prompts";
+import { shouldSurfaceInsight, storeOrStrengthenInsight } from "./insights";
+import type { AppEnv } from "./types";
 
 type ThinkResult = {
   response?: string;
@@ -36,7 +31,7 @@ function computeActivation(similarity: number, confidence: number, timesObserved
 }
 
 export const understandRoutes = new Hono<AppEnv>();
-understandRoutes.use("*", authMiddleware);
+understandRoutes.use("*", authMiddleware, rateLimitMiddleware, requireScopes("understand"));
 
 understandRoutes.get("/", async (c) => {
   const question = c.req.query("q")?.trim();
@@ -61,6 +56,7 @@ understandRoutes.get("/", async (c) => {
       context: "",
       nodes_used: 0,
       insights_used: 0,
+      new_insights_cached: 0,
       tokens: 0,
     });
   }
@@ -75,7 +71,9 @@ understandRoutes.get("/", async (c) => {
     .sort((left, right) => right.activation - left.activation)
     .slice(0, 25);
 
-  const surfacedInsights = insights.length === 0 ? [] : semanticSearch(queryVector, insights, 5).filter((insight) => insight.score >= 0.6);
+  const surfacedInsights = insights.length === 0
+    ? []
+    : semanticSearch(queryVector, insights, 10).filter((insight) => shouldSurfaceInsight(insight)).slice(0, 5);
   const knownPatterns = insights
     .filter((insight) => !surfacedInsights.some((candidate) => candidate.id === insight.id))
     .sort((left, right) => right.confidence - left.confidence || right.times_rediscovered - left.times_rediscovered)
@@ -122,6 +120,7 @@ understandRoutes.get("/", async (c) => {
     await markInsightsUsed(db, insightIdsUsed, new Date().toISOString());
   }
 
+  let newInsights = 0;
   for (const connection of result.new_connections ?? []) {
     const text = connection.text?.trim();
     if (!text) {
@@ -132,14 +131,10 @@ understandRoutes.get("/", async (c) => {
       activatedNodes.some((node) => node.id === nodeId),
     );
 
-    await upsertInsight(db, {
-      confidence: 0.6,
-      discoveredAt: new Date().toISOString(),
-      embedding: await generateEmbeddingBlob(c.env, text),
-      supportingNodes: supportingNodeIds,
-      text,
-      userId: c.get("user").id,
-    });
+    const stored = await storeOrStrengthenInsight(c.env, c.get("user").id, text, supportingNodeIds, 0.6);
+    if (stored.created) {
+      newInsights += 1;
+    }
   }
 
   await recordUsage(c, db, "queries");
@@ -148,6 +143,7 @@ understandRoutes.get("/", async (c) => {
     context: result.response ?? "",
     nodes_used: activatedNodes.length,
     insights_used: insightIdsUsed.length,
+    new_insights_cached: newInsights,
     tokens: usage?.total_tokens ?? 0,
   });
 });

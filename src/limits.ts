@@ -1,25 +1,34 @@
 import type { Client } from "@libsql/client/web";
 import type { Context } from "hono";
 
-import type { AppEnv } from "./middleware";
-import type { UserRow } from "./db";
-import { incrementUserUsage, updateUserUsagePeriod } from "./db";
+import { incrementUserUsage, updateUserUsagePeriod, type UserRow } from "./db";
+import type { AppEnv } from "./types";
 
 export type UsageKind = "queries" | "ingestions";
 
 export type PlanLimits = {
   queries: number;
-  ingestions: number;
+  ingestions: number | null;
 };
 
 const PLAN_LIMITS: Record<string, PlanLimits> = {
   free: { queries: 1000, ingestions: 100 },
   starter: { queries: 10000, ingestions: 1000 },
-  pro: { queries: 100000, ingestions: 10000 },
+  pro: { queries: 100000, ingestions: null },
+};
+
+const PLAN_REQUESTS_PER_MINUTE: Record<string, number> = {
+  free: 10,
+  starter: 60,
+  pro: 120,
 };
 
 export function getPlanLimits(plan: string): PlanLimits {
   return PLAN_LIMITS[plan] ?? PLAN_LIMITS.free;
+}
+
+export function getRequestsPerMinuteLimit(plan: string) {
+  return PLAN_REQUESTS_PER_MINUTE[plan] ?? PLAN_REQUESTS_PER_MINUTE.free;
 }
 
 export function getUsagePeriod(date: Date = new Date()) {
@@ -45,7 +54,7 @@ export async function syncUsagePeriod(c: Context<AppEnv>, db: Client) {
   }
 
   await updateUserUsagePeriod(db, user.id, usagePeriod);
-  const refreshed = {
+  const refreshed: UserRow = {
     ...user,
     usage_period: usagePeriod,
     usage_queries: 0,
@@ -62,7 +71,7 @@ export async function ensureWithinLimit(c: Context<AppEnv>, db: Client, kind: Us
   const current = getUsageValue(user, kind);
   const ceiling = limits[kind];
 
-  if (current < ceiling) {
+  if (ceiling === null || current < ceiling) {
     return null;
   }
 

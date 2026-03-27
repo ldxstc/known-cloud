@@ -12,7 +12,7 @@ import {
 } from "./db";
 import { generateEmbeddingBlobs, decodeEmbedding, semanticSearch } from "./embeddings";
 import { recordUsage, ensureWithinLimit } from "./limits";
-import type { AppEnv } from "./middleware";
+import type { AppEnv } from "./types";
 import { createJsonCompletion, EXTRACTION_MODEL } from "./openai";
 import {
   CONTRADICTION_SYSTEM,
@@ -22,7 +22,7 @@ import {
   INGEST_SYSTEM,
   INGEST_USER,
 } from "./prompts";
-import { authMiddleware } from "./middleware";
+import { authMiddleware, rateLimitMiddleware, requireScopes } from "./middleware";
 
 type ExtractedNode = {
   text?: string;
@@ -260,7 +260,7 @@ async function resolveNodeStorage(
 }
 
 export const ingestRoutes = new Hono<AppEnv>();
-ingestRoutes.use("*", authMiddleware);
+ingestRoutes.use("*", authMiddleware, rateLimitMiddleware, requireScopes("ingest"));
 
 ingestRoutes.post("/", async (c) => {
   const body = (await c.req.json().catch(() => null)) as IngestBody | null;
