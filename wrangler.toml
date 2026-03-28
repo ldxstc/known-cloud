@@ -2,14 +2,13 @@ name = "known-cloud"
 main = "src/index.ts"
 compatibility_date = "2025-03-01"
 
+routes = [
+  { pattern = "api.finallyknown.ai/*", zone_name = "finallyknown.ai" }
+]
+
 [vars]
 ENVIRONMENT = "production"
-APP_BASE_URL = "http://localhost:8787"
-TURSO_URL = ""
-TURSO_AUTH_TOKEN = ""
-OPENAI_API_KEY = ""
-STRIPE_SECRET_KEY = ""
-STRIPE_WEBHOOK_SECRET = ""
+APP_BASE_URL = "https://api.finallyknown.ai"
 
 # Secrets (set via wrangler secret put):
 # TURSO_URL
