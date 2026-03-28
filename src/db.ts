@@ -22,6 +22,7 @@ export interface EnvBindings {
   STRIPE_WEBHOOK_SECRET?: string;
   TURSO_AUTH_TOKEN?: string;
   TURSO_URL?: string;
+  AI?: any; // Cloudflare Workers AI binding (free embeddings)
 }
 
 export interface UserRow {

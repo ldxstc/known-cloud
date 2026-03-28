@@ -6,13 +6,9 @@ routes = [
   { pattern = "api.finallyknown.ai/*", zone_name = "finallyknown.ai" }
 ]
 
+[ai]
+binding = "AI"
+
 [vars]
 ENVIRONMENT = "production"
 APP_BASE_URL = "https://api.finallyknown.ai"
-
-# Secrets (set via wrangler secret put):
-# TURSO_URL
-# TURSO_AUTH_TOKEN
-# OPENAI_API_KEY
-# STRIPE_SECRET_KEY
-# STRIPE_WEBHOOK_SECRET
