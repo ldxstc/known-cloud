@@ -47,20 +47,27 @@ function averageEmbedding(nodes: NodeRow[]) {
 
 async function maximallyDistantClusters(env: AppEnv["Bindings"], userId: string, clusterSize: number = 5) {
   const db = await getDb(env);
-  const categories = await getDistinctUserNodeTypes(db, userId);
+
+  // SINGLE query: fetch all nodes with embeddings at once (avoids N+1 Turso subrequests)
+  const allNodesResult = await db.execute({
+    sql: "SELECT id, type, text, confidence, specific_context, embedding FROM nodes WHERE user_id = ? AND embedding IS NOT NULL ORDER BY confidence DESC LIMIT 120",
+    args: [userId],
+  });
+
+  // Group by type in JS — zero additional DB calls
+  const byType = new Map<string, NodeRow[]>();
+  for (const row of allNodesResult.rows) {
+    const node = row as unknown as NodeRow;
+    if (!byType.has(node.type)) byType.set(node.type, []);
+    const arr = byType.get(node.type)!;
+    if (arr.length < 3) arr.push(node);
+  }
+
   const entries = [];
-
-  for (const category of categories) {
-    const nodes = await getUserNodesByType(db, userId, category, clusterSize);
-    if (nodes.length < 3) {
-      continue;
-    }
-
+  for (const [category, nodes] of byType.entries()) {
+    if (nodes.length < 3) continue;
     const centroid = averageEmbedding(nodes);
-    if (!centroid) {
-      continue;
-    }
-
+    if (!centroid) continue;
     entries.push({ category, nodes, centroid });
   }
 

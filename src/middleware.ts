@@ -33,9 +33,21 @@ export const authMiddleware = createMiddleware<AppEnv>(async (c, next) => {
     return c.json({ error: "missing_authorization" }, 401);
   }
 
-  const db = await getDb(c.env);
+  let db;
+  try {
+    db = await getDb(c.env);
+  } catch {
+    return c.json({ error: "internal_error", message: "Database unavailable" }, 500);
+  }
 
-  const apiKey = await getActiveApiKeyByValue(db, token);
+  let apiKey;
+  try {
+    apiKey = await getActiveApiKeyByValue(db, token);
+  } catch (err) {
+    // DB error or key format error — treat as invalid
+    console.error("API key lookup error:", err);
+    return c.json({ error: "invalid_api_key", message: "Invalid API key" }, 401);
+  }
   if (apiKey) {
     const user = await getUserById(db, apiKey.user_id);
     if (!user) {

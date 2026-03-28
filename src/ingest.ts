@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 
 import {
-  findUserNodeByTypeAndText,
+  findUserNodeByTextPrefix, findUserNodeByTypeAndText,
   getDb,
   getUserNodes,
   insertNode,
@@ -10,7 +10,7 @@ import {
   countUserNodes,
   type NodeRow,
 } from "./db";
-import { generateEmbeddingBlobs, decodeEmbedding, semanticSearch } from "./embeddings";
+import { generateEmbeddingBlob, generateEmbeddingBlobs, decodeEmbedding, semanticSearch } from "./embeddings";
 import { recordUsage, ensureWithinLimit } from "./limits";
 import type { AppEnv } from "./types";
 import { createJsonCompletion, EXTRACTION_MODEL } from "./openai";
@@ -332,6 +332,32 @@ ingestRoutes.post("/", async (c) => {
       } else {
         nodesUpdated += 1;
         existingNodes = existingNodes.map((candidate) => (candidate.id === result.row.id ? result.row : candidate));
+      }
+    }
+  }
+
+  // For file sources: also store raw paragraphs as verbatim nodes
+  // This preserves exact text (URLs, API keys, dates, numbers) that LLM extraction may normalize
+  if (source && source.startsWith("file:")) {
+    const paragraphs = text.split(/\n\n+/).filter((p: string) => p.trim().length > 20);
+    for (const para of paragraphs.slice(0, 30)) {  // limit to 30 paragraphs
+      const trimmed = para.trim().slice(0, 500);  // cap length
+      const existing = await findUserNodeByTextPrefix(db, c.get("user").id, trimmed.slice(0, 80));
+      if (!existing) {
+        const embedding = await generateEmbeddingBlob(c.env, trimmed);
+        await insertNode(db, {
+          userId: c.get("user").id,
+          type: "verbatim:" + source,
+          text: trimmed,
+          specificContext: trimmed,
+          confidence: 0.9,
+          source: source,
+          embedding: embedding,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          timesObserved: 1,
+        });
+        nodesCreated += 1;
       }
     }
   }

@@ -1,7 +1,8 @@
 import { Hono } from "hono";
 import initSqlJs from "sql.js";
 
-import { getDb, getUserInsights, getUserNodes, insertInsight, insertNode, updateNodeObservation, upsertInsight, findUserNodeByTypeAndText } from "./db";
+import { getDb, getUserInsights, getUserNodes, insertInsight, insertNode, updateNodeObservation, upsertInsight, findUserNodeByTypeAndText, countUserNodes } from "./db";
+import { createInsightId, createNodeId } from "./ids";
 import { encodeEmbedding } from "./embeddings";
 import { authMiddleware, rateLimitMiddleware, requireUserAuth } from "./middleware";
 import type { AppEnv } from "./types";
@@ -94,83 +95,134 @@ function querySqlJs(db: InstanceType<Awaited<ReturnType<typeof getSqlJs>>["Datab
 
 async function importNodes(env: AppEnv["Bindings"], userId: string, rows: Array<Record<string, unknown>>) {
   const db = await getDb(env);
-  let created = 0;
-  let updated = 0;
+  const now = new Date().toISOString();
 
-  for (const row of rows) {
-    const type = typeof row.type === "string" ? row.type : null;
-    const text = typeof row.text === "string" ? row.text.trim() : null;
-    if (!type || !text) {
-      continue;
-    }
-
-    const existing = await findUserNodeByTypeAndText(db, userId, type, text);
-    if (existing) {
-      await updateNodeObservation(db, existing.id, {
-        confidence: Math.max(existing.confidence, typeof row.confidence === "number" ? row.confidence : existing.confidence),
-        embedding: normalizeImportedEmbedding(row.embedding) ?? existing.embedding,
-        filesTouched: typeof row.files_touched === "string" ? row.files_touched : existing.files_touched,
-        source: typeof row.source === "string" ? row.source : existing.source,
-        specificContext: typeof row.specific_context === "string" ? row.specific_context : existing.specific_context,
+  // Validate and normalize all rows first (no DB calls)
+  const validRows = rows
+    .map((row) => {
+      const type = typeof row.type === "string" ? row.type : null;
+      const text = typeof row.text === "string" ? row.text.trim() : null;
+      if (!type || !text) return null;
+      return {
+        id: typeof row.id === "string" ? row.id : createNodeId(),
         type,
-        updatedAt: typeof row.updated_at === "string" ? row.updated_at : new Date().toISOString(),
-      });
-      updated += 1;
-      continue;
-    }
+        text,
+        specificContext: typeof row.specific_context === "string" ? row.specific_context : null,
+        filesTouched: typeof row.files_touched === "string" ? row.files_touched : null,
+        confidence: typeof row.confidence === "number" ? row.confidence : 1,
+        source: typeof row.source === "string" ? row.source : "migration",
+        createdAt: typeof row.created_at === "string" ? row.created_at : now,
+        updatedAt: typeof row.updated_at === "string" ? row.updated_at : now,
+        decayRate: typeof row.decay_rate === "number" ? row.decay_rate : 0.01,
+        timesObserved: typeof row.times_observed === "number" ? row.times_observed : 1,
+        embedding: normalizeImportedEmbedding(row.embedding),
+      };
+    })
+    .filter((r): r is NonNullable<typeof r> => r !== null);
 
-    await insertNode(db, {
-      id: typeof row.id === "string" ? row.id : undefined,
+  if (validRows.length === 0) return { created: 0, updated: 0 };
+
+  // Use INSERT OR IGNORE to skip duplicates, batch all statements in one Turso call
+  // This is a single HTTP subrequest regardless of how many statements
+  const stmts = validRows.map((row) => ({
+    sql: `INSERT INTO nodes (id, user_id, type, text, specific_context, files_touched, confidence, source, created_at, updated_at, decay_rate, times_observed, embedding)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(id) DO UPDATE SET
+            confidence = MAX(nodes.confidence, excluded.confidence),
+            times_observed = nodes.times_observed + 1,
+            updated_at = excluded.updated_at,
+            embedding = COALESCE(excluded.embedding, nodes.embedding),
+            specific_context = COALESCE(excluded.specific_context, nodes.specific_context),
+            files_touched = COALESCE(excluded.files_touched, nodes.files_touched),
+            source = COALESCE(excluded.source, nodes.source)`,
+    args: [
+      row.id,
       userId,
-      type,
-      text,
-      specificContext: typeof row.specific_context === "string" ? row.specific_context : null,
-      filesTouched: typeof row.files_touched === "string" ? row.files_touched : null,
-      confidence: typeof row.confidence === "number" ? row.confidence : 1,
-      source: typeof row.source === "string" ? row.source : "migration",
-      createdAt: typeof row.created_at === "string" ? row.created_at : new Date().toISOString(),
-      updatedAt: typeof row.updated_at === "string" ? row.updated_at : new Date().toISOString(),
-      decayRate: typeof row.decay_rate === "number" ? row.decay_rate : 0.01,
-      timesObserved: typeof row.times_observed === "number" ? row.times_observed : 1,
-      embedding: normalizeImportedEmbedding(row.embedding),
-    });
-    created += 1;
+      row.type,
+      row.text,
+      row.specificContext,
+      row.filesTouched,
+      row.confidence,
+      row.source,
+      row.createdAt,
+      row.updatedAt,
+      row.decayRate,
+      row.timesObserved,
+      row.embedding,
+    ],
+  }));
+
+  // Turso batch: all statements in ONE HTTP request (1 subrequest total)
+  // Max ~500 statements per batch to stay safe
+  const BATCH_LIMIT = 400;
+  let created = 0;
+
+  for (let i = 0; i < stmts.length; i += BATCH_LIMIT) {
+    const batch = stmts.slice(i, i + BATCH_LIMIT);
+    const results = await db.batch(batch as any, "write");
+    for (const result of results) {
+      created += result.rowsAffected ?? 0;
+    }
   }
 
-  return { created, updated };
+  return { created, updated: validRows.length - created };
 }
 
 async function importInsights(env: AppEnv["Bindings"], userId: string, rows: Array<Record<string, unknown>>) {
   const db = await getDb(env);
-  let created = 0;
-  let updated = 0;
+  const now = new Date().toISOString();
 
-  for (const row of rows) {
-    const text = typeof row.text === "string" ? row.text.trim() : null;
-    if (!text) {
-      continue;
-    }
+  const validRows = rows
+    .map((row) => {
+      const text = typeof row.text === "string" ? row.text.trim() : null;
+      if (!text) return null;
+      return {
+        id: typeof row.id === "string" ? row.id : createInsightId(),
+        text,
+        supportingNodes: typeof row.supporting_nodes === "string" ? row.supporting_nodes : null,
+        confidence: typeof row.confidence === "number" ? row.confidence : 0.4,
+        discoveredAt: typeof row.discovered_at === "string" ? row.discovered_at : now,
+        timesRediscovered: typeof row.times_rediscovered === "number" ? row.times_rediscovered : 0,
+        timesUsed: typeof row.times_used === "number" ? row.times_used : 0,
+        lastUsed: typeof row.last_used === "string" ? row.last_used : null,
+        initiatedAt: typeof row.initiated_at === "string" ? row.initiated_at : null,
+        embedding: normalizeImportedEmbedding(row.embedding),
+      };
+    })
+    .filter((r): r is NonNullable<typeof r> => r !== null);
 
-    const result = await upsertInsight(db, {
+  if (validRows.length === 0) return { created: 0, updated: 0 };
+
+  const stmts = validRows.map((row) => ({
+    sql: `INSERT INTO insights (id, user_id, text, supporting_nodes, confidence, discovered_at, times_rediscovered, times_used, last_used, initiated_at, embedding)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(id) DO UPDATE SET
+            confidence = MAX(insights.confidence, excluded.confidence),
+            times_rediscovered = insights.times_rediscovered + 1,
+            text = CASE WHEN LENGTH(excluded.text) > LENGTH(insights.text) THEN excluded.text ELSE insights.text END,
+            embedding = COALESCE(excluded.embedding, insights.embedding)`,
+    args: [
+      row.id,
       userId,
-      text,
-      supportingNodes:
-        typeof row.supporting_nodes === "string"
-          ? (parseJsonArray(row.supporting_nodes) as string[])
-          : undefined,
-      confidence: typeof row.confidence === "number" ? row.confidence : 0.4,
-      discoveredAt: typeof row.discovered_at === "string" ? row.discovered_at : new Date().toISOString(),
-      embedding: normalizeImportedEmbedding(row.embedding),
-    });
+      row.text,
+      row.supportingNodes,
+      row.confidence,
+      row.discoveredAt,
+      row.timesRediscovered,
+      row.timesUsed,
+      row.lastUsed,
+      row.initiatedAt,
+      row.embedding,
+    ],
+  }));
 
-    if (result.created) {
-      created += 1;
-    } else {
-      updated += 1;
-    }
+  const results = await db.batch(stmts as any, "write");
+  let created = 0;
+  for (const result of results) {
+    created += result.rowsAffected ?? 0;
   }
 
-  return { created, updated };
+  return { created, updated: validRows.length - created };
 }
 
 export const migrateRoutes = new Hono<AppEnv>();

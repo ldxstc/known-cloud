@@ -1019,3 +1019,12 @@ export async function incrementRateLimitWindow(db: Client, subjectId: string, wi
 export async function cleanupOldRateLimitWindows(db: Client, cutoffIso: string) {
   await db.execute("DELETE FROM request_rate_limits WHERE updated_at < ?", [cutoffIso]);
 }
+
+
+export async function findUserNodeByTextPrefix(db: Client, userId: string, textPrefix: string) {
+  const result = await db.execute({
+    sql: "SELECT id FROM nodes WHERE user_id = ? AND text LIKE ? LIMIT 1",
+    args: [userId, textPrefix + "%"],
+  });
+  return result.rows.length > 0 ? result.rows[0] : null;
+}

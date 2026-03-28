@@ -18,7 +18,7 @@ const PLAN_LIMITS: Record<string, PlanLimits> = {
 };
 
 const PLAN_REQUESTS_PER_MINUTE: Record<string, number> = {
-  free: 10,
+  free: 30,
   starter: 60,
   pro: 120,
 };
