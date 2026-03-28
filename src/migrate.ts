@@ -235,3 +235,38 @@ migrateRoutes.get("/export", async (c) => {
     insights,
   });
 });
+
+// Re-embed all nodes with current embedding model (fixes dimension mismatch)
+migrateRoutes.post("/reembed", async (c) => {
+  const user = c.get("user");
+  const db = await getDb(c.env);
+  const env = c.env;
+
+  // Get all nodes for this user
+  const result = await db.execute({
+    sql: "SELECT id, text FROM nodes WHERE user_id = ? ORDER BY rowid LIMIT 20 OFFSET ?",
+    args: [user.id, Number(c.req.query("offset") ?? "0")],
+  });
+
+  let updated = 0;
+  const batchSize = 10;
+  const rows = result.rows as unknown as Array<{ id: string; text: string }>;
+
+  for (let i = 0; i < rows.length; i += batchSize) {
+    const batch = rows.slice(i, i + batchSize);
+    const texts = batch.map((r) => r.text);
+
+    const { generateEmbeddingBlobs } = await import("./embeddings");
+    const blobs = await generateEmbeddingBlobs(env, texts);
+
+    for (let j = 0; j < batch.length; j++) {
+      await db.execute({
+        sql: "UPDATE nodes SET embedding = ? WHERE id = ?",
+        args: [blobs[j] as any, batch[j]!.id],
+      });
+      updated++;
+    }
+  }
+
+  return c.json({ reembedded: updated, total: rows.length });
+});
