@@ -39,6 +39,7 @@ type IngestBody = {
   text?: string;
   session_id?: string;
   source?: string;
+  wait?: boolean;
 };
 
 const FACT_TYPE_PREFIX = "fact:";
@@ -265,6 +266,7 @@ ingestRoutes.use("*", authMiddleware, rateLimitMiddleware, requireScopes("ingest
 ingestRoutes.post("/", async (c) => {
   const body = (await c.req.json().catch(() => null)) as IngestBody | null;
   const text = body?.text?.trim();
+  // `wait` is accepted for API compatibility. Ingest already processes synchronously before returning.
 
   if (!text) {
     return c.json({ error: "text is required" }, 400);

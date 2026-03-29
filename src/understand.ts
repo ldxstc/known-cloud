@@ -35,6 +35,7 @@ understandRoutes.use("*", authMiddleware, rateLimitMiddleware, requireScopes("un
 
 understandRoutes.get("/", async (c) => {
   const question = c.req.query("q")?.trim();
+  const sessionKey = c.req.query("session_key")?.trim() || c.req.query("session_id")?.trim();
   if (!question) {
     return c.json({ error: "q is required" }, 400);
   }
@@ -62,7 +63,11 @@ understandRoutes.get("/", async (c) => {
   }
 
   const queryVector = await generateEmbeddingVector(c.env, question);
-  const relevantNodes = nodes.length <= 30 ? nodes.map((node) => ({ ...node, score: 1 })) : semanticSearch(queryVector, nodes, 20);
+  const baseRelevantNodes = nodes.length <= 30 ? nodes.map((node) => ({ ...node, score: 1 })) : semanticSearch(queryVector, nodes, 20);
+  const relevantNodes = baseRelevantNodes.map((node) => ({
+    ...node,
+    score: sessionKey && node.source === sessionKey ? node.score * 1.1 : node.score,
+  }));
   const activatedNodes = relevantNodes
     .map((node) => ({
       ...node,
