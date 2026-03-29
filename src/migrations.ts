@@ -192,6 +192,25 @@ const migrations: Migration[] = [
       `);
     },
   },
+  {
+    id: "005_messages_table",
+    run: async (db) => {
+      await db.executeMultiple(`
+        CREATE TABLE IF NOT EXISTS messages (
+          id TEXT PRIMARY KEY,
+          user_id TEXT NOT NULL,
+          session_id TEXT,
+          source TEXT,
+          text TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          FOREIGN KEY (user_id) REFERENCES users(id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_messages_user ON messages(user_id);
+        CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
+      `);
+    },
+  },
 ];
 
 export async function runMigrations(db: Client) {

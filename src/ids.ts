@@ -27,6 +27,10 @@ export function createInsightId() {
   return `ins_${randomId(16)}`;
 }
 
+export function createMessageId() {
+  return `msg_${randomId(16)}`;
+}
+
 export function createApiKey() {
   return `kn_live_${randomId(32)}`;
 }

@@ -8,6 +8,7 @@ import {
   createDeveloperClientSecret,
   createDeveloperId,
   createInsightId,
+  createMessageId,
   createNodeId,
   createUserId,
 } from "./ids";
@@ -111,6 +112,15 @@ export interface InsightRow {
   last_used: string | null;
   initiated_at: string | null;
   embedding: ArrayBuffer | null;
+}
+
+export interface MessageRow {
+  id: string;
+  user_id: string;
+  session_id: string | null;
+  source: string | null;
+  text: string;
+  created_at: string;
 }
 
 const initialized = new Map<string, Promise<void>>();
@@ -263,6 +273,17 @@ function mapInsight(row: Row): InsightRow {
     last_used: asString(row.last_used),
     initiated_at: asString(row.initiated_at),
     embedding: asBlob(row.embedding),
+  };
+}
+
+function mapMessage(row: Row): MessageRow {
+  return {
+    id: asRequiredString(row.id, "id"),
+    user_id: asRequiredString(row.user_id, "user_id"),
+    session_id: asString(row.session_id),
+    source: asString(row.source),
+    text: asRequiredString(row.text, "text"),
+    created_at: asRequiredString(row.created_at, "created_at"),
   };
 }
 
@@ -655,6 +676,69 @@ export async function countUserNodes(db: Client, userId: string) {
 export async function countUserInsights(db: Client, userId: string) {
   const result = await db.execute("SELECT COUNT(*) AS count FROM insights WHERE user_id = ?", [userId]);
   return asNumber(result.rows[0]?.count);
+}
+
+export async function insertMessage(
+  db: Client,
+  input: {
+    userId: string;
+    sessionId?: string | null;
+    source?: string | null;
+    text: string;
+    createdAt?: string;
+    id?: string;
+  },
+) {
+  const id = input.id ?? createMessageId();
+  const createdAt = input.createdAt ?? nowIso();
+  await db.execute(
+    `INSERT INTO messages (id, user_id, session_id, source, text, created_at)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+    [
+      id,
+      input.userId,
+      sanitizeNullableString(input.sessionId),
+      sanitizeNullableString(input.source),
+      input.text,
+      createdAt,
+    ],
+  );
+
+  const result = await db.execute("SELECT * FROM messages WHERE id = ? LIMIT 1", [id]);
+  if (!result.rows[0]) {
+    throw new Error("Message insertion failed.");
+  }
+
+  return mapMessage(result.rows[0]);
+}
+
+export async function grepUserMessages(db: Client, userId: string, query: string, limit: number = 10) {
+  const result = await db.execute(
+    `SELECT * FROM messages
+     WHERE user_id = ? AND text LIKE ?
+     ORDER BY created_at DESC
+     LIMIT ?`,
+    [userId, `%${query}%`, limit],
+  );
+
+  return result.rows.map(mapMessage);
+}
+
+export async function findUserNodeById(db: Client, userId: string, nodeId: string) {
+  const result = await db.execute("SELECT * FROM nodes WHERE user_id = ? AND id = ? LIMIT 1", [userId, nodeId]);
+  return result.rows[0] ? mapNode(result.rows[0]) : null;
+}
+
+export async function findMessagesBySessionOrSource(db: Client, userId: string, value: string, limit: number = 5) {
+  const result = await db.execute(
+    `SELECT * FROM messages
+     WHERE user_id = ? AND (session_id = ? OR source = ?)
+     ORDER BY created_at DESC
+     LIMIT ?`,
+    [userId, value, value, limit],
+  );
+
+  return result.rows.map(mapMessage);
 }
 
 export async function getUserNodes(db: Client, userId: string) {

@@ -7,7 +7,9 @@ import { billingRoutes } from "./billing";
 import { dashboardRoutes } from "./dashboard";
 import { developerRoutes } from "./developers";
 import { discoverRoutes } from "./discover";
+import { expandRoutes } from "./expand";
 import { forgetRoutes } from "./forget";
+import { grepRoutes } from "./grep";
 import { ingestRoutes } from "./ingest";
 import { insightRoutes } from "./insights";
 import { migrateRoutes } from "./migrate";
@@ -38,6 +40,8 @@ app.get("/", (c) =>
 app.route("/auth", authRoutes);
 app.route("/access", accessRoutes);
 app.route("/ingest", ingestRoutes);
+app.route("/grep", grepRoutes);
+app.route("/expand", expandRoutes);
 app.route("/understand", understandRoutes);
 app.route("/search", searchRoutes);
 app.route("/stats", statsRoutes);

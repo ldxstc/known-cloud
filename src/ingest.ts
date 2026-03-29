@@ -4,6 +4,7 @@ import {
   findUserNodeByTextPrefix, findUserNodeByTypeAndText,
   getDb,
   getUserNodes,
+  insertMessage,
   insertNode,
   penalizeNodeConfidence,
   updateNodeObservation,
@@ -46,6 +47,8 @@ const FACT_TYPE_PREFIX = "fact:";
 const DEDUP_SIMILARITY_THRESHOLD = 0.8;
 const MAX_CONTRADICTION_CHECKS = 3;
 const MAX_CHUNK_CHARS = 30000;
+const LARGE_BLOCK_THRESHOLD = 10000;
+const RAW_MESSAGE_CHUNK_CHARS = 5000;
 const FILE_REGEX = /(?:~\/|\.\/|\/[\w-]+\/|[\w-]+\/)[\w./-]+\.\w{1,10}/g;
 
 function normalizeNodeType(type?: string) {
@@ -164,6 +167,11 @@ function chunkText(text: string, maxChars: number) {
   return chunks;
 }
 
+function buildChunkSource(source: string | null, sessionId: string | null, index: number, total: number) {
+  const base = source ?? sessionId ?? "ingest";
+  return `${base}#chunk:${index + 1}/${total}`;
+}
+
 function tagFactNodes(nodes: ExtractedNode[]) {
   return nodes.map((node) => ({
     ...node,
@@ -279,7 +287,31 @@ ingestRoutes.post("/", async (c) => {
   }
 
   const source = body?.source?.trim() || body?.session_id?.trim() || null;
-  const chunks = chunkText(text, MAX_CHUNK_CHARS);
+  const sessionId = body?.session_id?.trim() || (source && !source.startsWith("file:") ? source : null);
+  const createdAt = new Date().toISOString();
+  await insertMessage(db, {
+    userId: c.get("user").id,
+    sessionId,
+    source,
+    text,
+    createdAt,
+  });
+
+  if (text.length > LARGE_BLOCK_THRESHOLD) {
+    const rawChunks = chunkText(text, RAW_MESSAGE_CHUNK_CHARS);
+    for (const [index, rawChunk] of rawChunks.entries()) {
+      await insertMessage(db, {
+        userId: c.get("user").id,
+        sessionId,
+        source: buildChunkSource(source, sessionId, index, rawChunks.length),
+        text: rawChunk,
+        createdAt,
+      });
+    }
+  }
+
+  const extractionText = text.length > LARGE_BLOCK_THRESHOLD ? text.slice(0, MAX_CHUNK_CHARS) : text;
+  const chunks = chunkText(extractionText, MAX_CHUNK_CHARS);
   const filesTouched = extractFilesTouched(text);
   let nodesCreated = 0;
   let nodesUpdated = 0;
