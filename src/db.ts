@@ -332,7 +332,7 @@ export async function getUserByStripeSubscriptionId(db: Client, subscriptionId: 
 
 export async function getActiveApiKeyByValue(db: Client, keyValue: string) {
   const result = await db.execute(
-    "SELECT * FROM api_keys WHERE key_value = ? AND revoked_at IS NULL LIMIT 1",
+    "SELECT * FROM api_keys WHERE key_value = ? LIMIT 1",
     [keyValue],
   );
 
@@ -340,13 +340,13 @@ export async function getActiveApiKeyByValue(db: Client, keyValue: string) {
 }
 
 export async function getActiveApiKeyById(db: Client, keyId: string) {
-  const result = await db.execute("SELECT * FROM api_keys WHERE id = ? AND revoked_at IS NULL LIMIT 1", [keyId]);
+  const result = await db.execute("SELECT * FROM api_keys WHERE id = ? LIMIT 1", [keyId]);
   return result.rows[0] ? mapApiKey(result.rows[0]) : null;
 }
 
 export async function getActiveApiKeyByDeviceId(db: Client, deviceId: string) {
   const result = await db.execute(
-    "SELECT * FROM api_keys WHERE device_id = ? AND revoked_at IS NULL LIMIT 1",
+    "SELECT * FROM api_keys WHERE device_id = ? LIMIT 1",
     [deviceId],
   );
 
@@ -355,7 +355,7 @@ export async function getActiveApiKeyByDeviceId(db: Client, deviceId: string) {
 
 export async function listActiveApiKeys(db: Client, userId: string) {
   const result = await db.execute(
-    "SELECT * FROM api_keys WHERE user_id = ? AND revoked_at IS NULL ORDER BY created_at DESC",
+    "SELECT * FROM api_keys WHERE user_id = ? ORDER BY created_at DESC",
     [userId],
   );
 
@@ -364,7 +364,7 @@ export async function listActiveApiKeys(db: Client, userId: string) {
 
 export async function countActiveApiKeys(db: Client, userId: string) {
   const result = await db.execute(
-    "SELECT COUNT(*) AS count FROM api_keys WHERE user_id = ? AND revoked_at IS NULL",
+    "SELECT COUNT(*) AS count FROM api_keys WHERE user_id = ?",
     [userId],
   );
 
@@ -409,7 +409,7 @@ export async function createApiKeyRecord(
 
 export async function revokeApiKey(db: Client, userId: string, keyId: string) {
   await db.execute(
-    "UPDATE api_keys SET revoked_at = ? WHERE id = ? AND user_id = ? AND revoked_at IS NULL",
+    "UPDATE api_keys SET revoked_at = ? WHERE id = ? AND user_id = ?",
     [nowIso(), keyId, userId],
   );
 
@@ -431,7 +431,7 @@ export async function getUserByDeviceId(db: Client, deviceId: string) {
 
 export async function getActiveAccessGrantByToken(db: Client, token: string) {
   const result = await db.execute(
-    "SELECT * FROM access_grants WHERE access_token = ? AND revoked_at IS NULL LIMIT 1",
+    "SELECT * FROM access_grants WHERE access_token = ? LIMIT 1",
     [token],
   );
 
@@ -441,7 +441,7 @@ export async function getActiveAccessGrantByToken(db: Client, token: string) {
 export async function getActiveAccessGrantByUserAndDeveloper(db: Client, userId: string, developerId: string) {
   const result = await db.execute(
     `SELECT * FROM access_grants
-     WHERE user_id = ? AND developer_id = ? AND revoked_at IS NULL
+     WHERE user_id = ? AND developer_id = ?
      ORDER BY created_at DESC LIMIT 1`,
     [userId, developerId],
   );
@@ -500,7 +500,7 @@ export async function createOrUpdateAccessGrant(
 
 export async function listActiveAccessGrants(db: Client, userId: string) {
   const result = await db.execute(
-    "SELECT * FROM access_grants WHERE user_id = ? AND revoked_at IS NULL ORDER BY created_at DESC",
+    "SELECT * FROM access_grants WHERE user_id = ? ORDER BY created_at DESC",
     [userId],
   );
 
@@ -511,7 +511,7 @@ export async function revokeAccessGrant(db: Client, userId: string, developerId:
   await db.execute(
     `UPDATE access_grants
      SET revoked_at = ?
-     WHERE user_id = ? AND developer_id = ? AND revoked_at IS NULL`,
+     WHERE user_id = ? AND developer_id = ?`,
     [nowIso(), userId, developerId],
   );
 
